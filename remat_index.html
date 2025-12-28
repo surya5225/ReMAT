@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ReMAT - OrthoKinetic Clinical Web Portal</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.js"></script>
+    <style>
+        :root { --primary: #3498db; --bg: #0a0a0a; --card: #161616; --green: #4ce820; --red: #f53141; --yellow: #f1c40f; }
+        body { background: var(--bg); color: white; font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; overflow: hidden; }
+        .sidebar { width: 280px; background: var(--card); height: 100vh; padding: 25px; border-right: 1px solid #222; box-sizing: border-box; display: flex; flex-direction: column; z-index: 10; }
+        button { width: 100%; padding: 14px; margin-bottom: 12px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 13px; }
+        .btn-connect { background: var(--primary); color: white; margin-bottom: 10px; }
+        .btn-disconnect { background: var(--yellow); color: black; margin-bottom: 20px; display: none; }
+        .btn-base { background: var(--green); color: black; }
+        .btn-inj { background: #8bf50a; color: black; margin-top: 20px; }
+        .btn-stop { background: var(--red); color: white; }
+        .status-box { background: #000; padding: 12px; border-radius: 6px; text-align: center; margin-top: auto; font-size: 12px; border: 1px solid #333; }
+        .main { flex: 1; height: 100vh; padding: 20px; box-sizing: border-box; position: relative; }
+        
+        #report-overlay { 
+            display: none; 
+            position: fixed; 
+            top: 0; 
+            left: 0; 
+            width: 100vw; 
+            height: 100vh; 
+            background: #050505; 
+            z-index: 99999; 
+            overflow-y: auto; 
+            padding: 40px; 
+            box-sizing: border-box; 
+        }
+
+        .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-top: 20px; }
+        .insight-box { background: #1c1c1c; padding: 15px; border-radius: 8px; border-left: 4px solid var(--primary); }
+        .metric-title { color: var(--primary); font-weight: bold; margin-bottom: 5px; display: block; }
+        .metric-vals { font-size: 14px; color: #ddd; }
+        .metric-insight { font-size: 12px; color: #888; font-style: italic; margin-top: 8px; line-height: 1.4; }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <h2 style="color: var(--primary); margin: 0 0 5px 0;">ReMAT</h2>
+    <p style="font-size: 11px; color: #666; margin-bottom: 20px;">OrthoKinetic Analysis Tool</p>
+    <button id="connectBtn" class="btn-connect" onclick="connectBLE()">CONNECT BLUETOOTH</button>
+    <button id="disconnectBtn" class="btn-disconnect" onclick="disconnectBLE()">DISCONNECT SENSOR</button>
+    <button class="btn-base" onclick="startCapture('baseline')">Start Baseline</button>
+    <button class="btn-stop" onclick="stopCapture()">Stop Baseline</button>
+    <button class="btn-inj" onclick="startCapture('injured')">Start Injured</button>
+    <button class="btn-stop" onclick="analyzeData()">Stop & Analyze</button>
+    <div class="status-box">STATUS: <span id="status-text" style="color: #f53141;">DISCONNECTED</span></div>
+</div>
+
+<div class="main">
+    <div id="livePlot" style="width:100%; height:85vh;"></div>
+</div>
+
+<div id="report-overlay">
+    <button onclick="closeReport()" style="width: 120px; float: right; position: sticky; top: 0;" class="btn-stop">CLOSE</button>
+    <h1 style="color: var(--green); text-align: center; margin-top: 20px;">Clinical Outcome Report</h1>
+    <h1 id="totalScore" style="text-align: center; font-size: 80px; margin: 10px 0; color: white;">0%</h1>
+    <p id="recInsight" style="text-align: center; color: #aaa; margin-bottom: 40px; font-size: 18px;"></p>
+
+    <div style="background: #161616; padding: 20px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #333;">
+        <h3 style="color: var(--primary);">Comparative Motion Analysis</h3>
+        <div id="graphX"></div>
+        <div id="graphY"></div>
+        <div id="graphZ"></div>
+        <div id="graphMag"></div>
+    </div>
+
+    <h3>Biomechanical Metrics</h3>
+    <div class="grid-3" id="insightGrid"></div>
+</div>
+
+<script>
+const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+let bleDevice = null, bleChar = null;
+let baselineData = [], injuredData = [], mode = null;
+let lx = [], ly = [], lz = [];
+
+function speak(text) {
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const msg = new SpeechSynthesisUtterance(text);
+        msg.rate = 0.9;
+        window.speechSynthesis.speak(msg);
+    }
+}
+
+function updateConnectionUI(connected) {
+    const statusText = document.getElementById('status-text');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    
+    if (connected) {
+        statusText.innerText = "CONNECTED";
+        statusText.style.color = "var(--green)";
+        connectBtn.style.display = "none";
+        disconnectBtn.style.display = "block";
+    } else {
+        statusText.innerText = "DISCONNECTED";
+        statusText.style.color = "#f53141";
+        connectBtn.style.display = "block";
+        disconnectBtn.style.display = "none";
+    }
+}
+
+function onDisconnected() {
+    updateConnectionUI(false);
+    mode = null;
+    bleDevice = null;
+    bleChar = null;
+    speak("Sensor Disconnected");
+}
+
+async function disconnectBLE() {
+    if (bleDevice && bleDevice.gatt.connected) {
+        try {
+            await bleDevice.gatt.disconnect();
+        } catch (e) {
+            console.warn("Disconnect error:", e);
+        }
+    }
+    onDisconnected();
+}
+
+async function connectBLE() {
+    try {
+        console.log("Requesting Bluetooth Device...");
+        bleDevice = await navigator.bluetooth.requestDevice({
+            filters: [{ name: 'ReMAT_Sensor' }],
+            optionalServices: [SERVICE_UUID]
+        });
+
+        bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+        const server = await bleDevice.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        bleChar = await service.getCharacteristic(CHARACTERISTIC_UUID);
+        
+        await bleChar.startNotifications();
+        bleChar.addEventListener('characteristicvaluechanged', (e) => {
+            const csv = new TextDecoder().decode(e.target.value);
+            const parts = csv.split(',');
+            if(parts.length < 4) return;
+
+            const x = parseFloat(parts[1]), y = parseFloat(parts[2]), z = parseFloat(parts[3]);
+            
+            lx.push(x); ly.push(y); lz.push(z);
+            if(lx.length > 100) { lx.shift(); ly.shift(); lz.shift(); }
+
+            if(mode === 'baseline') {
+                baselineData.push([x,y,z]);
+            } else if(mode === 'injured') {
+                injuredData.push([x,y,z]);
+            }
+
+            if(parts[4] === "1") speak("Alert. Fall detected.");
+            if(parts[6] === "1") speak("Help requested.");
+
+            Plotly.update('livePlot', { y: [lx, ly, lz] });
+        });
+        
+        updateConnectionUI(true);
+        speak("Sensor Connected");
+    } catch (err) { 
+        console.error(err);
+        alert("Bluetooth Error: " + err.message);
+        updateConnectionUI(false);
+    }
+}
+
+function startCapture(m) { 
+    if(m === 'baseline') { baselineData = []; console.log("Baseline reset"); }
+    if(m === 'injured') { injuredData = []; console.log("Injured reset"); }
+    mode = m; 
+    speak(m + " capture started"); 
+}
+
+function stopCapture() { 
+    mode = null; 
+    speak("Capture stopped"); 
+}
+
+function closeReport() { 
+    document.getElementById('report-overlay').style.display = "none"; 
+}
+
+// =============== HELPER FUNCTIONS ===============
+function movingAverage(data, window = 5) {
+    const result = [];
+    for (let i = 0; i < data.length; i++) {
+        let sum = 0, count = 0;
+        const start = Math.max(0, i - Math.floor(window/2));
+        const end = Math.min(data.length - 1, i + Math.floor(window/2));
+        for (let j = start; j <= end; j++) {
+            sum += data[j];
+            count++;
+        }
+        result.push(sum / count);
+    }
+    return result;
+}
+
+function zeroCrossingRate(signal) {
+    let crossings = 0;
+    for (let i = 1; i < signal.length; i++) {
+        if ((signal[i] >= 0 && signal[i - 1] < 0) || (signal[i] < 0 && signal[i - 1] >= 0)) {
+            crossings++;
+        }
+    }
+    return crossings;
+}
+
+function pearsonCorrelation(x, y) {
+    const n = Math.min(x.length, y.length);
+    if (n < 2) return 0;
+    try {
+        return math.correlation(x, y);
+    } catch (e) {
+        return 0;
+    }
+}
+
+function signalEnergy(signal) {
+    return signal.reduce((sum, val) => sum + val * val, 0);
+}
+
+// =============== CORE ANALYSIS ===============
+function computeAllParams(data) {
+    const arr = data;
+    const x = arr.map(d => d[0]);
+    const y = arr.map(d => d[1]);
+    const z = arr.map(d => d[2]);
+    const mag = arr.map(d => Math.sqrt(d[0]**2 + d[1]**2 + d[2]**2));
+
+    const angles = mag.map((m, i) => {
+        const cosTheta = z[i] / (m + 1e-9);
+        return Math.acos(Math.max(-1, Math.min(1, cosTheta))) * (180 / Math.PI);
+    });
+    const rom = Math.max(...angles);
+
+    const smooth = movingAverage(mag, 5);
+
+    // Pure JS jerk calculation (no math.js matrix issues)
+    const dMag = mag.slice(1).map((current, i) => current - mag[i]);
+    const jerk = dMag.length > 0
+        ? Math.sqrt(dMag.reduce((sum, d) => sum + d * d, 0) / dMag.length)
+        : 0;
+
+    const t_peak = mag.indexOf(Math.max(...mag)) / 50;
+    const residual = mag.map((m, i) => m - (smooth[i] || 0));
+    const tremor = zeroCrossingRate(residual);
+    const lastSamples = mag.length > 50 ? mag.slice(-50) : mag;
+    const stability = math.variance(lastSamples);
+    const energy = signalEnergy(mag);
+
+    return { raw: arr, x, y, z, mag, smooth, rom, jerk, t_peak, tremor, stability, energy };
+}
+
+function analyzeData() {
+    mode = null;
+    if (baselineData.length < 10 || injuredData.length < 10) {
+        alert("Not enough data! Please record Baseline and Injured movements first.");
+        return;
+    }
+
+    try {
+        const b = computeAllParams(baselineData);
+        const i = computeAllParams(injuredData);
+
+        const minLen = Math.min(b.smooth.length, i.smooth.length);
+        const corr = minLen > 1 ? pearsonCorrelation(b.smooth.slice(0, minLen), i.smooth.slice(0, minLen)) : 0;
+
+        const romScore = Math.min(i.rom / (b.rom + 1e-6), 1.0);
+        const jerkScore = 1.0 / (1.0 + Math.abs(i.jerk - b.jerk));
+        const stabilityScore = 1.0 / (1.0 + Math.abs(i.stability - b.stability));
+        const corrScore = Math.max(0, Math.min(1, corr));
+
+        const score = (0.4 * romScore + 0.3 * corrScore + 0.2 * jerkScore + 0.1 * stabilityScore) * 100;
+
+        document.getElementById('report-overlay').style.display = "block";
+        document.getElementById('totalScore').innerText = score.toFixed(1) + "%";
+        const recInsight = (s => 
+            s >= 85 ? "Functional recovery achieved. Readiness for return to activity." :
+            s >= 65 ? "Partial recovery. Continued rehabilitation recommended." :
+            "Poor recovery status. High risk of dysfunction or reinjury."
+        )(score);
+        document.getElementById('recInsight').innerText = recInsight;
+
+        const plotC = (id, bD, iD, title) => {
+            Plotly.newPlot(id, [
+                { y: bD, name: 'Baseline', line: { dash: 'dot', color: '#555' } },
+                { y: iD, name: 'Injured', line: { color: '#3498db', width: 2 } }
+            ], {
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: '#fff', size: 10 },
+                margin: { t: 30, b: 30, l: 50, r: 10 },
+                yaxis: { range: [-255, 255], title: title, gridcolor: '#222' }
+            });
+        };
+
+        plotC('graphX', b.x, i.x, 'X-Axis');
+        plotC('graphY', b.y, i.y, 'Y-Axis');
+        plotC('graphZ', b.z, i.z, 'Z-Axis');
+
+        Plotly.newPlot('graphMag', [
+            { y: b.mag, name: 'Baseline', line: { dash: 'dot', color: '#555' } },
+            { y: i.mag, name: 'Injured', line: { color: '#e67e22', width: 2 } }
+        ], {
+            paper_bgcolor: 'rgba(0,0,0,0)',
+            plot_bgcolor: 'rgba(0,0,0,0)',
+            font: { color: '#fff', size: 10 },
+            margin: { t: 30, b: 30, l: 50, r: 10 },
+            yaxis: { range: [0, 450], title: 'Magnitude', gridcolor: '#222' }
+        });
+
+        const metrics = [
+            {
+                n: "Range of Motion (ROM)",
+                bv: b.rom.toFixed(1) + "°",
+                iv: i.rom.toFixed(1) + "°",
+                ins: (i.rom / b.rom >= 0.95)
+                    ? "Joint mobility is near normal. Indicates restored flexibility."
+                    : (i.rom / b.rom >= 0.80)
+                    ? "Mild range restriction observed. Suggests residual stiffness."
+                    : "Significant ROM reduction. Indicates joint stiffness or pain inhibition."
+            },
+            {
+                n: "Fluidity (Jerk Index)",
+                bv: b.jerk.toFixed(3),
+                iv: i.jerk.toFixed(3),
+                ins: (i.jerk <= b.jerk * 1.1)
+                    ? "Movement smoothness comparable to baseline. Control well restored."
+                    : (i.jerk <= b.jerk * 1.5)
+                    ? "Moderate increase in jerk. Indicates reduced coordination."
+                    : "High jerk observed. Suggests poor neuromuscular control or guarding."
+            },
+            {
+                n: "Hold Stability",
+                bv: b.stability.toFixed(3),
+                iv: i.stability.toFixed(3),
+                ins: (i.stability <= b.stability * 1.2)
+                    ? "Postural stability maintained. Good proprioceptive control."
+                    : (i.stability <= b.stability * 1.6)
+                    ? "Mild instability detected. Indicates stabilizer weakness."
+                    : "High instability. Elevated fall or reinjury risk."
+            },
+            {
+                n: "Path Correlation",
+                bv: "1.00",
+                iv: corr.toFixed(2),
+                ins: (corr >= 0.9)
+                    ? "Movement pattern matches baseline. Motor memory is restored."
+                    : (corr >= 0.75)
+                    ? "Partial movement deviation. Ongoing relearning required."
+                    : "Significant deviation. Compensatory motor strategy present."
+            },
+            {
+                n: "Tremor Index",
+                bv: b.tremor,
+                iv: i.tremor,
+                ins: (i.tremor < 10)
+                    ? "Minimal tremor. Fine motor control is stable."
+                    : (i.tremor < 25)
+                    ? "Mild tremor. Indicates neuromuscular fatigue or control deficit."
+                    : "High tremor. Suggests poor motor unit synchronization."
+            },
+            {
+                n: "Time-to-Peak",
+                bv: b.t_peak.toFixed(2) + "s",
+                iv: i.t_peak.toFixed(2) + "s",
+                ins: Math.abs(i.t_peak - b.t_peak) <= 0.1
+                    ? "Force generation timing is normal. Response is efficient."
+                    : i.t_peak > b.t_peak
+                    ? "Delayed force peak. Indicates weakness or neural inhibition."
+                    : "Early peak. Suggests compensatory or abrupt movement strategy."
+            },
+            {
+                n: "Spectral Energy",
+                bv: Math.round(b.energy),
+                iv: Math.round(i.energy),
+                ins: (() => {
+                    const ratio = i.energy / (b.energy + 1e-6);
+                    if (ratio >= 0.9 && ratio <= 1.1) return "Energy is efficient. Muscle activation well regulated.";
+                    else if (ratio > 1.1) return "Excessive energy usage. Indicates co-contraction/inefficiency.";
+                    else return "Low energy output. Suggests under-activation or fear-limited motion.";
+                })()
+            },
+            {
+                n: "Symmetry Ratio",
+                bv: "100%",
+                iv: ((i.rom / (b.rom + 1e-6)) * 100).toFixed(1) + "%",
+                ins: "Calculated based on limb-to-limb range comparison."
+            }
+        ];
+
+        document.getElementById('insightGrid').innerHTML = metrics.map(m => `
+            <div class="insight-box">
+                <span class="metric-title">${m.n}</span>
+                <div class="metric-vals">B: ${m.bv} | I: ${m.iv}</div>
+                <div class="metric-insight">${m.ins}</div>
+            </div>
+        `).join('');
+
+        speak("Analysis complete. Score: " + Math.round(score) + " percent.");
+    } catch (e) {
+        console.error(e);
+        alert("Analysis Error: " + (e.message || e.toString()));
+    }
+}
+
+// Live Plot Initialization
+Plotly.newPlot('livePlot', [
+    { y: [], name: 'X', line: { color: '#3498db' } },
+    { y: [], name: 'Y', line: { color: '#e74c3c' } },
+    { y: [], name: 'Z', line: { color: '#2ecc71' } }
+], {
+    paper_bgcolor: 'rgba(0,0,0,0)', 
+    plot_bgcolor: 'rgba(0,0,0,0)', 
+    font: { color: '#fff' },
+    yaxis: { range: [-255, 255], gridcolor: '#222' }, 
+    margin: { t: 10, b: 40, l: 50, r: 20 }
+});
+</script>
+</body>
+</html>
